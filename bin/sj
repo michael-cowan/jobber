@@ -1,0 +1,360 @@
+#!/bin/bash
+
+# SCRIPT TO SETUP CP2K PBE CALCULATION
+# - currently supports GEO_OPT and ENERGY calc types
+
+
+# -----------------------------------------------
+# NEED TO SPECIFY CLUSTER (supports h2p and comet)
+
+
+#cluster="h2p";
+cluster="comet";
+
+# -----------------------------------------------
+
+
+# help option to print description of script & possible arguments
+if [ -z "$1" ]
+then
+    echo "must pass in .xyz file"
+elif [ "$1" = "--help" -o "$1" = "-h" ]
+then
+    echo 
+    echo "script to setup CP2K PBE calculations"
+    echo
+    echo "CURRENT CLUSTER:"
+    echo "$cluster"
+    echo
+    echo "ARGUMENTS:"
+    echo "[.xyz_file]"
+    echo
+    echo "OPTIONS:"
+    echo "-n || --nodes [num nodes]     -- (default = 2)"
+    echo "-c || --cores [num cores]     -- (default = 24)"
+    echo "-r || --runtype [run  type]   -- (default = GEO_OPT)  {GEO_OPT, ENERGY, VIB}"
+    echo "-t || --runtime [runtime]     -- (default = 48 hrs)   {MAX: comet: 48, h2p: 144}"
+    echo "-q || --charge [charge]       -- (default = 0)"
+    echo "-s || --boxsize [side length] -- (default = 40.0 ang.)"
+    echo "-f || --functional [xc func]  -- (default = PBE)"
+    echo "      --tctemp  [vib. temp]   -- (default = 298.15 K)"
+    echo "      --title [job name]    -- (default = 1st part of xyz)"
+    echo
+    echo "SWITCHES"
+    echo "--uks                         -- (default = RKS)      {turns on UKS}"
+    echo "--d3                          -- (default = no D3)    {turns on D3}"
+    echo "--d3bj                        -- (default = no D3)    {turns on D3 with BJ damping}"
+    echo "--fitbox                      -- (default = 40 ang.)  {sets boxsize using bbox}"
+    echo "--nosmear                     -- (default = smear)    {turns off Fermi-Dirac Smearing}"
+    echo "--donotcenter                 -- (default = center)   {geom coords will not be centered in box";
+    echo "--quiet                       -- (default = FALSE)    {supresses output}";
+    echo
+else
+
+    # .xyz file name
+    GEOMFILE="$1";
+    shift
+
+    # max cores per node and max wall time allowed for calculations
+    if [ "$cluster" = "h2p" ]
+    then
+        MAXCORES=28;
+        MAXWALLTIME=145;
+    else
+        MAXCORES=24;
+        MAXWALLTIME=49;
+    fi
+
+    # main name of run
+    JOBNAME=$(echo "$GEOMFILE" | sed 's/.xyz$//');
+
+    # attempts to truncate name to use for .inp & .sl files
+    INAME=$(echo "$JOBNAME" | sed 's/_[^ ]\+$//');
+
+    # slurm and input file names
+    SLURM="slurm_$INAME.sl";
+    INP="input_$INAME.inp";
+
+    # DEFAULTS 
+    NUMNODES="2";
+    NUMCORES="$MAXCORES";
+    RUNTYPE="GEO_OPT";
+    FUNC="PBE";
+    TIME="48";
+    CHARGE="0";
+    BLENGTH="40.00000";
+    TCTEMP="298.15";
+    UKS=FALSE;
+    D3=FALSE;
+    D3BJ=FALSE;
+    SMEAR=TRUE;
+    CENTER=TRUE;
+    QUIET=FALSE;
+
+    # template file info
+    BASEINPUT=~/.templates/input.inp;
+    INPUTLENGTH=$(wc -l < "$BASEINPUT");
+    D3PATH=~/.templates/d3.txt;
+
+    # slurm path depends on cluster
+    BASESLURM=~/.templates/slurm_"$cluster".sl;
+
+    ### HANDLE ARGS AND SWITCHES PASSED IN ###
+    while [ "$#" -gt 0 ]
+    do
+        case "$1" in
+
+        ### ARGS ###
+        # number of nodes
+        -n | --nodes)
+            shift
+            NUMNODES="$1";
+            shift
+            ;;
+        # number of cores
+        -c | --cores)
+            shift
+            # ensure 0 < numcores < maxcores
+            if [ "$(( $1 ))" -gt 0 -a "$(( $1 ))" -le "$MAXCORES" ]
+            then
+                NUMCORES="$1";
+            else
+                echo "invalid # cores given - default ($NUMCORES) will be used"
+            fi
+            shift
+            ;;
+        # calculation type (currently GEO_OPT and ENERGY supported)
+        -r | --runtype)
+            shift
+            lower=$(echo "$1" | tr '[:upper:]' '[:lower:]');
+            if [ "$lower" = "geo_opt" ] || [ "$lower" = "relax" ]
+            then
+                RUNTYPE="GEO_OPT";
+            elif [ "$lower" = "energy" ]
+            then
+                RUNTYPE="ENERGY";
+            elif [ "$lower" = "vib" ]
+            then
+                RUNTYPE="VIBRATIONAL_ANALYSIS";
+            fi
+            shift
+            ;;
+        # runtime in hours
+        -t | --runtime)
+            shift
+            if [ "$(( $1 ))" -gt 0 -a "$(( $1  ))" -lt "$MAXWALLTIME" ]
+            then
+                TIME=$(awk -v a="$1" 'BEGIN{printf("%02i", a)};');
+            else
+                echo "invalid time given - default ($TIME) will be used"
+            fi
+            shift
+            ;;
+        # system charge
+        -q | --charge)
+            shift
+            CHARGE="$1";
+            shift
+            ;;
+        # side length (in angstrom) of cubic computational box
+        -s | --boxsize)
+            shift
+            BLENGTH=$(awk -v a="$1" 'BEGIN{printf("%.5f", a)};');
+            shift
+            ;;
+        # xc-functional
+        -f | --functional)
+            shift
+            FUNC="$1";
+            shift
+            ;;
+        --tctemp)
+            shift
+            TCTEMP="$1";
+            shift
+            ;;
+
+        --title)
+            shift
+            JOBNAME="$1";
+            shift
+            ;;
+
+        ### SWITCHES ###
+        # unrestricted Kohn-Sham calculation
+        --uks)
+            UKS=TRUE;
+            shift
+            ;;
+        # PBE-D3 calculation
+        --d3)
+            D3=TRUE;
+            shift
+            ;;
+        # PBE-D3(BJ) calculation
+        --d3bj)
+            D3BJ=TRUE;
+            shift
+            ;;
+        # calc appropriate box side length using bbox script
+        --fitbox)
+            # side length of bounding box for geometry
+            check=$(bbox "$GEOMFILE" noprint);
+            if [ "$check" != "Incorrect path" ]
+            then
+                BLENGTH="$check";
+            fi
+            shift
+            ;;
+        # turn off Fermi-Dirac smearing
+        --nosmear)
+            SMEAR=FALSE;
+            shift
+            ;;
+        # do not center atoms in box
+        --donotcenter)
+            CENTER=FALSE;
+            shift
+            ;;
+        # quiet output
+        --quiet)
+            QUIET=TRUE;
+            shift
+            ;;
+        # invalid argument found
+        *)
+            echo "SETUP FAILED - error with option $1";
+            exit 1
+            ;;
+        esac
+    done
+
+
+    ### BUILD INPUT FILE ###
+
+    # if D3, need to add it in XC section
+    if [ "$D3" = TRUE ] || [ "$D3BJ" = TRUE ]
+    then
+        FUNC="PBE-D3";
+        xc=$(grep -n "&XC$" "$BASEINPUT" | egrep -o "[0-9]+")
+        xcend=$(( 1 + $INPUTLENGTH - $(grep -n "&XC_FUNCTIONAL" "$BASEINPUT" | egrep -o "[0-9]+") ));
+        # write input to cwd including D3
+        head -"$xc" "$BASEINPUT" > "$INP";
+        cat "$D3PATH" >> "$INP";
+        tail -"$xcend" "$BASEINPUT" >> "$INP";
+
+        # change calc type to D3(BJ) if D3BJ is switched
+        # NOTE: D3(BJ) switch has priority over D3 switch
+        if [ "$D3BJ" = TRUE ]
+        then
+            FUNC="PBE-D3(BJ)";
+            sed -i "s/DFTD3/DFTD3(BJ)/" "$INP";
+        fi
+    else
+        # copy .inp to cwd and format 
+        cp "$BASEINPUT" "$INP";  
+    fi
+
+    # if --nosmear flag given, turn off smearing
+    if [ "$SMEAR" = FALSE ]
+    then
+       sed -i 's/SMEAR ON/SMEAR OFF/' "$INP";
+    fi
+
+    # don't center coordinates if center is false
+    if [ "$CENTER" = FALSE ]
+    then
+        sed -i 's/&CENTER/#\&CENTER/' "$INP";
+        sed -i 's/&END CENTER/#\&END CENTER/' "$INP";
+    fi
+
+    # add vibrational analysis info if vib run 
+    if [ "$RUNTYPE" = "VIBRATIONAL_ANALYSIS" ]
+    then
+        cat ~/.templates/vib.txt >> "$INP";
+        sed -i "s/_TCTEMP_/$TCTEMP/" "$INP";
+    fi
+
+    ### EDIT INPUT FILE ###
+    sed -i "s/_JOBNAME_/$JOBNAME/" "$INP";
+    sed -i "s/_GEOMFILE_/$GEOMFILE/" "$INP";
+    sed -i "s/_BLENGTH_/$BLENGTH/g" "$INP";
+    sed -i "s/_XCFUNC_/$FUNC/" "$INP";
+    sed -i "s/_RTYPE_/$RUNTYPE/" "$INP";
+    sed -i "s/_CHG_/$CHARGE/" "$INP";
+    sed -i "s/_UKSOPTION_/UKS .$UKS./" "$INP";    
+
+    ### BUILD SLURM FILE ###
+    
+    # copy .sl to cwd and format
+    cp "$BASESLURM" "$SLURM";
+
+    # if h2p and 1 node, switch to smp
+    if [ "$cluster" = "h2p" ]
+    then
+        if [ "$NUMNODES" = "1" ]
+        then
+            PARTITION="SMP";
+            sed -i "s/_CLUSTER_/smp/" "$SLURM";
+            sed -i "s/opa/smp/" "$SLURM";
+            if [ "$(( $NUMCORES ))" -gt 24 ]
+            then
+                echo "Running on smp - number of core reduced to 24"
+                NUMCORES="24";
+            fi
+        else
+            PARTITION="MPI";
+            sed -i "s/_CLUSTER_/mpi/" "$SLURM";
+        fi
+    fi
+
+    ### EDIT SLURM FILE ###
+    sed -i "s/_JOBNAME_/$JOBNAME/" "$SLURM";
+    sed -i "s/_NUMNODES_/$NUMNODES/" "$SLURM";
+    sed -i "s/_NUMCORES_/$NUMCORES/" "$SLURM";
+    sed -i "s/INAME/$INAME/g" "$SLURM";
+    sed -i "s/_HRS_/$TIME/" "$SLURM";
+
+    if [ "$QUIET" = false ]
+    then
+        ### PRINT FINAL JOB PARAMETERS ###
+        echo
+        echo "---------- SETUP COMPLETE ----------"
+        echo
+        echo "         CLUSTER INFO"
+        echo "           NAME = $cluster";
+
+        # only print partition if running on h2p
+        if [ "$cluster" = "h2p" ]
+        then
+        echo "      PARTITION = $PARTITION";
+        fi
+
+        echo
+        echo "           INPUT INFO"
+        echo "   PROJECT NAME = $JOBNAME";
+        echo "       DFT TYPE = $FUNC";
+        echo "       RUN TYPE = $RUNTYPE";
+
+        #  only print thermochem temp if vib run
+        if [ "$RUNTYPE" = "VIBRATIONAL_ANALYSIS" ]
+        then
+        echo "         TCTEMP = $TCTEMP";
+        fi
+
+        echo "   TOTAL CHARGE = $CHARGE";
+        echo "BOX SIDE LENGTH = $BLENGTH Ang.";
+        echo "  CENTER COORDS = $CENTER";
+        echo "            UKS = $UKS";
+        echo "          SMEAR = $SMEAR";
+        echo
+        echo "           SLURM INFO"
+        echo "NUMBER OF NODES = $NUMNODES";
+        echo " CORES PER NODE = $NUMCORES";
+        echo "    TOTAL CORES = $(( $NUMNODES * $NUMCORES ))";
+        echo "        RUNTIME = $TIME Hr";
+        echo
+        echo "------------------------------------"
+    fi
+fi
+
