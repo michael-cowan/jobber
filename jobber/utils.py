@@ -1,4 +1,15 @@
 import numpy as np
+import os
+
+
+def files_exist(path, files):
+    """
+    Returns True if all files exist within path
+    """
+    for f in files:
+        if not os.path.isfile(os.path.join(path, f)):
+            return False
+    return True
 
 
 def multidimensional_shifting(num_samples, sample_size, elements,
@@ -6,6 +17,16 @@ def multidimensional_shifting(num_samples, sample_size, elements,
     """
     Magic sampling technique I found online
     https://medium.com/ibm-watson/incredibly-fast-random-sampling-in-python-baf154bd836a
+
+    Args:
+    num_samples (int): number of random samples to create
+    sample_size (int): length of each sample - how many items to choose
+                       from <elements> WITHOUT REPLACEMENT
+    elements (list): list of elements to choose from
+
+    KArgs:
+    probabilites (list): list of probabilites for selecting each element
+                         (Default: None = uniform probability)
     """
     # default to uniform probabilities
     if probabilities is None:
@@ -23,3 +44,9 @@ def multidimensional_shifting(num_samples, sample_size, elements,
     shifted_probabilities = random_shifts - replicated_probabilities
     return np.argpartition(shifted_probabilities,
                            sample_size, axis=1)[:, :sample_size]
+
+
+if __name__ == '__main__':
+    # create 5 samples of 3 items selected from range(20)
+    print(multidimensional_shifting(num_samples=5, sample_size=3,
+                                    elements=range(20)))
