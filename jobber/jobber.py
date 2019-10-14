@@ -100,17 +100,18 @@ class Tracker(object):
         return
 
         # run setup job script - sj
-        slurm_id = subprocess.check_output(sj).split()[-1]
-
-        # save slurm id as empty file
-        open(os.path.join(jobid.path, slurm_id), 'w').close()
+        subprocess.call(sj)
 
     def submit_job(self, jobid):
         """
         Runs a CP2K job
         """
         # TODO: uncomment this and test on Comet
-        # subprocess.call(['sbatch', jobid.slurm])
+        # slurm_id = subprocess.check_output(['sbatch', jobid.slurm]).split()[-1]
+
+        # save slurm id as empty file
+        # open(os.path.join(jobid.path, slurm_id), 'w').close()
+
         self.running.append(str(jobid))
         print('Submitted %s' % str(jobid))
 
@@ -126,9 +127,6 @@ class Jobber(Tracker):
 
         # initialize Tracker info
         super(Jobber, self).__init__()
-
-        # dopant concentrations
-        self.dope_concs = np.arange(10, 100, 10)
 
         # main NC directory
         self.nc_dir = os.path.join(PROJECT_PATH, nc)
@@ -160,11 +158,15 @@ class Jobber(Tracker):
         self.n_core = len(self.core_opt)
         self.n_shellint = self.shell_opt.info['nshellint']
 
-        # get dopant counts
-        self.n_dopes = (self.n_au * self.dope_concs / 100.).round().astype(int)
-        self.actual_concs = (self.n_dopes / float(self.n_au)) * 100
+        # create job directory if not made
+        self.job_dir = os.path.join(self.nc_dir, 'jobs')
+        if not os.path.isdir(self.job_dir):
+            os.mkdir(self.job_dir)
 
     def get_ncid(self, atoms):
+        """
+        Generates a unique ordering NC ID
+        """
         return atoms.get_atomic_numbers()[self.au_indices]
 
     def get_opt_nc(self):
@@ -194,46 +196,60 @@ class Jobber(Tracker):
 
         return True
 
-    def get_info_str(self, conc):
+    def get_info_str(self, conc, n_dope, actual_conc):
         """
         Creates a string of NC info based on
         dopant concentration
         """
-        i = np.where(self.dope_concs == int(conc))[0][0]
         txt = self.nc + '\n'
         txt += 'Dopant(s): %s\n' % (', '.join(self.dopant_list))
-        txt += '  % Doped: ' + '%.2f\n' % self.actual_concs[i]
-        txt += ' N Dopant: %i\n' % self.n_dopes[i]
-        txt += '     N Au: %i\n' % (self.n_au - self.n_dopes[i])
+        txt += '  % Doped: ' + '%.2f\n' % actual_conc
+        txt += ' N Dopant: %i\n' % n_dope
+        txt += '     N Au: %i\n' % (self.n_au - n_dope)
         return txt
+
+    def init_conc_dir(self, conc):
+        """
+        Initialize folder for jobs with <conc> dopant concentration
+
+        Returns:
+        conc_dir (str): path to dopant conc. folder
+        n_dope (int): actual number of dopants
+        """
+        # get number of dopants
+        n_dope = int(round(self.n_au * conc / 100))
+
+        # get actual dopant percentage (in % units)
+        actual_conc = (n_dope / float(self.n_au)) * 100
+
+        # directory is actual concentration of dopant to 1 decimal point
+        # e.g. 10.212% = dirname '10_2'
+        actual_str = str(round(actual_conc, 1))
+        conc_base = '%02i_%s' % (int(actual_str[:2]), actual_str[-1])
+        conc_dir = os.path.join(self.job_dir, conc_base)
+
+        # create dope_conc directory and add INFO file
+        if not os.path.isdir(conc_dir):
+            os.mkdir(conc_dir)
+            with open(os.path.join(conc_dir, 'INFO'), 'w') as fidw:
+                fidw.write(self.get_info_str(conc, n_dope, actual_conc))
+
+        # return concentration folder path and number of dopants
+        return conc_dir, n_dope
 
     def gen_orderings(self, dope_conc, n, only_core=False, run=False,
                       runtype=DEFAULT_RUNTYPE, verbose=True):
         """
         Generates <n> random chemical orderings with a given <dope_conc>
         """
-        i = np.where(self.dope_concs == int(dope_conc))[0][0]
-
         # get indices where dopant can be added
         indices = self.core_indices if only_core else self.au_indices
 
-        # get number of dopants to add
-        n_dope = self.n_dopes[i]
+        # initialize dopant conc directory if necessary
+        conc_dir, n_dope = self.init_conc_dir(dope_conc)
 
-        # get rounded concentration
-        dope_conc = self.dope_concs[i]
-
-        # create job directory
-        job_dir = os.path.join(self.nc_dir, 'jobs')
-        if not os.path.isdir(job_dir):
-            os.mkdir(job_dir)
-
-        # create dope_conc directory and add INFO file
-        conc_dir = os.path.join(job_dir, str(dope_conc))
-        if not os.path.isdir(conc_dir):
-            os.mkdir(conc_dir)
-            with open(os.path.join(conc_dir, 'INFO'), 'w') as fidw:
-                fidw.write(self.get_info_str(dope_conc))
+        # get basename of conc directory
+        conc_dirname = os.path.basename(conc_dir)
 
         # read in previous ncids
         prev_ncids_path = os.path.join(conc_dir, '.prev_ncids.npz')
@@ -253,12 +269,13 @@ class Jobber(Tracker):
         # create new atoms objects and save them to a job directory
         n_made = 0
         new_ncids = []
+        jobids = [None] * n
         for o in orderings:
             if n_made == n:
                 break
 
             # generate jobid and build folder
-            jobid = JobID(self, dope_conc, runtype=runtype)
+            jobid = JobID(self, conc_dirname, runtype=runtype)
 
             # create new atoms object and add dopant
             new_atoms = self.nc_opt.copy()
@@ -302,6 +319,9 @@ class Jobber(Tracker):
             # add ncid to list of accepted new_ncids
             new_ncids.append(ncid)
 
+            # add jobid to list
+            jobids[n_made] = jobid
+
             # ensure only <n> orderings are created
             n_made += 1
 
@@ -316,29 +336,32 @@ class Jobber(Tracker):
         if run:
             self.update_tracker('running')
 
+        # return JobIDs
+        return jobids
+
 
 class JobID(object):
     """
     Unique JobID to build path to job and track
     which jobs are running, completed, or failed
     """
-    def __init__(self, jobber=None, dope_conc=None, runtype=DEFAULT_RUNTYPE,
-                 jobid_str=None):
+    def __init__(self, jobber=None, conc_dirname=None,
+                 runtype=DEFAULT_RUNTYPE, jobid_str=None):
         # jobid can be initialized by arguments or
         # a previously generated jobid string
         self.nc_dir = None
         self.nc = None
         self.dopant = None
-        self.dope_conc = None
+        self.conc_dirname = None
         self.ordering_id = None
         self.runtype = None
         if jobid_str is not None:
             self.parse_jobid_str(jobid_str)
         else:
-            self.parse_args(jobber, dope_conc)
+            self.parse_args(jobber, conc_dirname)
 
         # build jobid
-        self.value = '-'.join([self.nc, self.dopant, self.dope_conc,
+        self.value = '-'.join([self.nc, self.dopant, self.conc_dirname,
                                self.ordering_id, self.runtype])
 
         # path to job directory based on jobid
@@ -363,20 +386,20 @@ class JobID(object):
         """
         Test to see if two JobIds are the same
         """
-        for p in ['nc', 'nc_dir', 'dopant', 'dope_conc',
+        for p in ['nc', 'nc_dir', 'dopant', 'dope_concname',
                   'ordering_id', 'runtype', 'value']:
             if getattr(self, p) != getattr(compare, p):
                 return False
         return True
 
-    def parse_args(self, jobber, dope_conc, runtype=DEFAULT_RUNTYPE):
+    def parse_args(self, jobber, conc_dirname, runtype=DEFAULT_RUNTYPE):
         """
         Parses arguments to get job info
         """
         self.nc_dir = jobber.nc_dir
         self.nc = jobber.nc
         self.dopant = jobber.dopant
-        self.dope_conc = str(dope_conc)
+        self.conc_dirname = str(conc_dirname)
         self.ordering_id = self.get_ordering_id()
         self.runtype = runtype
 
@@ -391,7 +414,7 @@ class JobID(object):
         self.nc = parts[0]
         self.nc_dir = os.path.join(PROJECT_PATH, self.nc)
         self.dopant = parts[1]
-        self.dope_conc = parts[2]
+        self.conc_dirname = parts[2]
         self.ordering_id = parts[3]
         self.runtype = parts[4]
 
@@ -402,7 +425,7 @@ class JobID(object):
         """
         Finds the next ordering id number
         """
-        path = os.path.join(self.nc_dir, 'jobs', self.dope_conc)
+        path = os.path.join(self.nc_dir, 'jobs', self.conc_dirname)
 
         # attempt to find all previous ordering id folders
         last_found = glob.glob(os.path.join(path, '[0-9]' * 6))
@@ -448,5 +471,10 @@ class JobID(object):
 if __name__ == '__main__':
     j = Jobber()
 
-    for conc in range(10, 100, 10):
-        j.gen_orderings(conc, n=10, run=True)
+    # for conc in range(10, 100, 10):
+    jobids = j.gen_orderings(50, n=20, run=True)
+
+    jobid = jobids[0]
+    print(jobid)
+    print(jobid.is_initialized())
+    print(jobid.is_running())
