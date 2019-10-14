@@ -8,10 +8,11 @@ import numpy as np
 import ase.io
 
 # main path to project folder
-# PROJECT_PATH = os.path.join(os.path.expanduser('~'), 'nc_ordering')
+PROJECT_PATH = os.path.join(os.path.expanduser('~'), 'nc_ordering')
+
 # TEST PATH
-PROJECT_PATH = os.path.join(os.path.dirname(os.path.realpath(__file__)),
-                            '..', 'tests', 'nc_ordering')
+# PROJECT_PATH = os.path.join(os.path.dirname(os.path.realpath(__file__)),
+#                             '..', 'tests', 'nc_ordering')
 
 DEFAULT_RUNTYPE = 'PBE'
 
@@ -19,6 +20,8 @@ DEFAULT_PARAMS = {'279_84': {'nodes': 2,
                              'cores': 18,
                              'bsize': 43.7,
                              'run_time': 48}}
+
+RJUST = 20
 
 
 class Tracker(object):
@@ -92,28 +95,41 @@ class Tracker(object):
         if not os.path.isdir(jobid.path):
             raise NotADirectoryError(jobid.path)
 
+        cwd = os.getcwd()
+
+        os.chdir(jobid.path)
+
         sj = ['sj', jobid.xyz, '-n', nodes, '-c', cores, '-t', run_time,
               '-f', jobid.runtype, '--donotcenter']
 
         # TODO: remove this and test on Comet
-        print(' '.join(sj))
-        return
+        # print(' '.join(sj))
+        # return
 
         # run setup job script - sj
         subprocess.call(sj)
+
+        # move back to CWD
+        os.chdir(cwd)
 
     def submit_job(self, jobid):
         """
         Runs a CP2K job
         """
+
+        cwd = os.getcwd()
+        os.chdir(jobid.path)
+
         # TODO: uncomment this and test on Comet
-        # slurm_id = subprocess.check_output(['sbatch', jobid.slurm]).split()[-1]
+        slurm_id = subprocess.check_output(['sbatch', jobid.slurm]).split()[-1]
 
         # save slurm id as empty file
-        # open(os.path.join(jobid.path, slurm_id), 'w').close()
+        open(os.path.join(jobid.path, slurm_id), 'w').close()
 
         self.running.append(str(jobid))
-        print('Submitted %s' % str(jobid))
+        print('Submitted:'.rjust(RJUST) + ' %s' % str(jobid))
+
+        os.chdir(cwd)
 
 
 class Jobber(Tracker):
@@ -217,15 +233,17 @@ class Jobber(Tracker):
         n_dope (int): actual number of dopants
         """
         # get number of dopants
-        n_dope = int(round(self.n_au * conc / 100))
+        n_dope = int(round(self.n_au * conc / 100.))
 
         # get actual dopant percentage (in % units)
-        actual_conc = (n_dope / float(self.n_au)) * 100
+        actual_conc = (n_dope / float(self.n_au)) * 100.
 
         # directory is actual concentration of dopant to 1 decimal point
         # e.g. 10.212% = dirname '10_2'
         actual_str = str(round(actual_conc, 1))
-        conc_base = '%02i_%s' % (int(actual_str[:2]), actual_str[-1])
+        integer = actual_str[:actual_str.index('.')]
+        decimal = actual_str[-1]
+        conc_base = '%02i_%s' % (int(integer), decimal)
         conc_dir = os.path.join(self.job_dir, conc_base)
 
         # create dope_conc directory and add INFO file
@@ -307,7 +325,7 @@ class Jobber(Tracker):
 
             # let user know jobid has been initialized
             if verbose and jobid.is_initialized():
-                print('Initialized: %s' % str(jobid))
+                print('Initialized:'.rjust(RJUST) + ' %s' % str(jobid))
 
             # setup job
             self.setup_job(jobid)
@@ -472,7 +490,7 @@ if __name__ == '__main__':
     j = Jobber()
 
     # for conc in range(10, 100, 10):
-    jobids = j.gen_orderings(50, n=20, run=True)
+    jobids = j.gen_orderings(50, n=2, run=True)
 
     jobid = jobids[0]
     print(jobid)
