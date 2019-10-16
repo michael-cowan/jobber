@@ -100,7 +100,8 @@ class Tracker(object):
         os.chdir(jobid.path)
 
         sj = ['sj', jobid.xyz, '-n', nodes, '-c', cores, '-t', run_time,
-              '-f', jobid.runtype, '--title', str(jobid), '--donotcenter']
+              '-f', jobid.runtype, '-s', bsize, '--title', str(jobid),
+              '--donotcenter']
 
         # TODO: remove this and test on Comet
         # print(' '.join(sj))
