@@ -4,6 +4,7 @@ import re
 import glob
 import pathlib
 import subprocess
+import shutil
 import numpy as np
 import ase.io
 
@@ -19,7 +20,14 @@ DEFAULT_RUNTYPE = 'PBE'
 DEFAULT_PARAMS = {'279_84': {'nodes': 2,
                              'cores': 18,
                              'bsize': 43.7,
-                             'run_time': 48}}
+                             'run_time': 48},
+                  '36_24': {'nodes': 2,
+                            'cores': 18,
+                            'bsize': 32.1,
+                            'run_time': 48}}
+
+# regex string to match jobid
+REGEX_JOBID = '[0-9]+_[0-9]+-[A-Za-z]+-[0-9]{2}_[0-9]-[0-9]{6}-[A-Za-z0-9]+'
 
 RJUST = 20
 
@@ -64,10 +72,12 @@ class Tracker(object):
             # try to read in tracker data
             if os.path.isfile(path):
                 with open(path, 'r') as fidr:
-                    data = fidr.read().strip().split('\n')
+                    data = set(fidr.read().strip().split('\n'))
+                    if '' in data:
+                        data.remove('')
             else:
                 # print('%s does not exist.' % name)
-                data = []
+                data = set()
 
             # set tracker attribute to list of data (or empty list)
             setattr(self, name, data)
@@ -83,54 +93,48 @@ class Tracker(object):
         with open(getattr(self, tracker + '_path'), 'w') as fidw:
             fidw.write('\n'.join(getattr(self, tracker)))
 
-    def setup_job(self, jobid):
+    def autoupdate(self, basedir=None):
         """
-        Sets up a CP2K job with default options
+        Returns JobID objects of all found jobs
         """
-        nodes = str(DEFAULT_PARAMS[jobid.nc]['nodes'])
-        cores = str(DEFAULT_PARAMS[jobid.nc]['cores'])
-        bsize = str(DEFAULT_PARAMS[jobid.nc]['bsize'])
-        run_time = str(DEFAULT_PARAMS[jobid.nc]['run_time'])
+        if basedir is None:
+            basedir = PROJECT_PATH
 
-        if not os.path.isdir(jobid.path):
-            raise NotADirectoryError(jobid.path)
+        # take slice of entire list to ensure complete iteration
+        # while removing items from self.running
+        print('----- CURRENT STATUS -----'.center(3 * RJUST))
+        for js in list(self.running)[:] + list(self.needscheck)[:]:
+            # make JobID object from JobID string (js)
+            jobid = JobID(jobid_str=js)
 
-        cwd = os.getcwd()
+            # if job is still running,
+            # leave it in running list
+            result = jobid.is_running()
+            if result:
+                res_str = result.title() + ':'
+                print(res_str.rjust(RJUST) + ' ' + js)
+                if js in self.needscheck:
+                    self.needscheck.remove(js)
+                self.running.add(js)
+                continue
+            else:
+                self.running.remove(js)
 
-        os.chdir(jobid.path)
+            # move jobid to completed list
+            if jobid.is_completed():
+                print('Completed:'.rjust(RJUST) +  ' ' + js)
+                self.completed.add(js)
 
-        sj = ['sj', jobid.xyz, '-n', nodes, '-c', cores, '-t', run_time,
-              '-f', jobid.runtype, '-s', bsize, '--title', str(jobid),
-              '--donotcenter']
+            # else restart job
+            else:
+                print('Restarting:'.rjust(RJUST) + ' ' + js)
+                jobid.restart()
+                self.needscheck.add(js)
 
-        # TODO: remove this and test on Comet
-        # print(' '.join(sj))
-        # return
-
-        # run setup job script - sj
-        subprocess.call(sj)
-
-        # move back to CWD
-        os.chdir(cwd)
-
-    def submit_job(self, jobid):
-        """
-        Runs a CP2K job
-        """
-
-        cwd = os.getcwd()
-        os.chdir(jobid.path)
-
-        # TODO: uncomment this and test on Comet
-        slurm_id = subprocess.check_output(['sbatch', jobid.slurm]).split()[-1]
-
-        # save slurm id as empty file
-        open(os.path.join(jobid.path, slurm_id), 'w').close()
-
-        self.running.append(str(jobid))
-        print('Submitted:'.rjust(RJUST) + ' %s' % str(jobid))
-
-        os.chdir(cwd)
+        # update trackers
+        self.update_tracker('running')
+        self.update_tracker('completed')
+        self.update_tracker('needscheck')
 
 
 class Jobber(Tracker):
@@ -154,7 +158,7 @@ class Jobber(Tracker):
         self.shell_opt = None
         if not self.get_opt_nc():
             raise ValueError("Invalid NC given. Make sure NC folder has been"
-                             "made and includes optimized NC (in auopt)")
+                             " made and includes optimized NC (in auopt)")
 
         # tag nc atom order
         self.nc_opt.set_tags(list(range(len(self.nc_opt))))
@@ -206,6 +210,7 @@ class Jobber(Tracker):
             xyz = os.path.join(auopt, '%s_opt.xyz' % name)
             if not os.path.isfile(xyz):
                 return False
+
             # NC attribute should use generic 'nc_opt' name
             if i == 0:
                 name = 'nc'
@@ -317,23 +322,30 @@ class Jobber(Tracker):
             # build folder for job
             jobid.build_folder()
 
+            # JobID string: js
+            js = str(jobid)
+
             # set jobid to atoms object and save as xyz
-            new_atoms.info['jobid'] = str(jobid)
+            new_atoms.info['jobid'] = js
             new_atoms.write(jobid.xyz_path)
 
             # write jobid file that contains ncid
-            np.save(os.path.join(jobid.path, '%s.npy' % str(jobid)), ncid)
+            np.save(os.path.join(jobid.path, '%s.npy' % js), ncid)
 
             # let user know jobid has been initialized
             if verbose and jobid.is_initialized():
-                print('Initialized:'.rjust(RJUST) + ' %s' % str(jobid))
+                print('Initialized:'.rjust(RJUST) + ' %s' % js)
 
             # setup job
-            self.setup_job(jobid)
+            jobid.setup_job()
 
             # submit job
             if run:
-                self.submit_job(jobid)
+                jobid.submit_job()
+
+                # add jobid to running list
+                self.running.add(str(jobid))
+                print('Submitted:'.rjust(RJUST) + ' %s' % js)
 
             # add ncid to list of accepted new_ncids
             new_ncids.append(ncid)
@@ -366,6 +378,8 @@ class JobID(object):
     """
     def __init__(self, jobber=None, conc_dirname=None,
                  runtype=DEFAULT_RUNTYPE, jobid_str=None):
+
+
         # jobid can be initialized by arguments or
         # a previously generated jobid string
         self.nc_dir = None
@@ -467,11 +481,39 @@ class JobID(object):
         """
         return utils.files_exist(self.path, [self.slurm, self.input])
 
-    def is_running(self):
+    def is_running(self, queue=None):
         """
         TODO: search sacct results to see if jobid is running
         """
-        return utils.files_exist(self.path, [self.output])
+        # if not utils.files_exist(self.path, [self.output]):
+        #     return False
+
+        if queue is None:
+            queue = subprocess.check_output('sacct -X --format="JobID, JobName%50, State"', shell=True)
+
+        # try to find a slurm ID to match
+        slurm_id = [i for i in os.listdir(self.path) if len(i) == 8 and i.isdigit()]
+        if slurm_id:
+            slurm_id = slurm_id[0]
+
+        # pull slurm ID, JobID, and job status from queue string
+        status = re.findall('(\\d{8}) +(' + REGEX_JOBID + ') +([A-Z]+)', queue)
+        status += re.findall('(\\d{8}) +(' + self.xyz.strip('.xyz') + ') + ([A-Z]+)', queue)
+
+        # look for match in status
+        for s in status:
+            # only check items that are pending or running
+            if s[-1] not in ['RUNNING', 'PENDING']:
+                continue
+
+            # check to see if a slurm ID exists and check for match
+            # check to see if JobID matches
+            if (slurm_id and slurm_id == s[0]) or (str(self) == s[1]):
+                # if match, return state of job (PENDING | RUNNING)
+                return s[-1]
+
+        # no matches found
+        return False
 
     def is_completed(self):
         has_output = utils.files_exist(self.path, [self.output])
@@ -482,10 +524,103 @@ class JobID(object):
 
         # see if output file ends with CP2K completion string
         last_line = '  **** **  *******  **  PROGRAM STOPPED IN'
-        with open(self.output, 'rb') as fidr:
-            fidr.seek(-160, 2)
-            return fidr.readlines()[-1].startswith(last_line)
+        end = subprocess.check_output(['tail', '-3',
+                                       os.path.join(self.path, self.output)])
 
+        # Completed if last_line found at end of file
+        return last_line in end
+
+    def restart(self):
+        """
+        Standard procedure to restart GEO_OPT CP2K job
+        """
+
+        cwd = os.getcwd()
+
+        # change directory to jobid path
+        os.chdir(self.path)
+
+        # find slurm_id, restartfile, and a{i}_c folders
+        # a{i}_c matches
+        matches = []
+        slurm_id = None
+        restartfile = None
+        for f in os.listdir('.'):
+            if re.match('a\\d+_(ws_)?c', f):
+                matches.append(f)
+            elif len(f) == 8 and f.isdigit():
+                slurm_id = f
+            elif f.endswith('.restart'):
+                restartfile = f
+
+        # make a{i}_c folder (enumerate {i} to track previous restarts)
+        prevrun_dir = 'a%i_c' % (len(matches))
+        os.mkdir(prevrun_dir)
+
+        # move 4 files into prevrun_dir
+        shutil.move(self.input, prevrun_dir)
+        shutil.move(self.output, os.path.join(prevrun_dir, self.output + 'c'))
+        shutil.move('er.outp', prevrun_dir)
+        if slurm_id is not None:
+            shutil.move(slurm_id, prevrun_dir)
+
+        # create new input file with restartfile
+        with open(restartfile, 'r') as fidr:
+            with open(self.input, 'w') as fidw:
+                for line in fidr:
+                    # convert ATOMIC to RESTART
+                    if 'ATOMIC' in line:
+                        fidw.write(line.replace('ATOMIC', 'RESTART'))
+
+                    # do not write lines containing COORD_FILE
+                    if 'COORD_FILE' not in line:
+                        fidw.write(line)
+
+        # submit job
+        self.submit_job()
+
+    def setup_job(self):
+        """
+        Sets up a CP2K job with default options
+        """
+        nodes = str(DEFAULT_PARAMS[self.nc]['nodes'])
+        cores = str(DEFAULT_PARAMS[self.nc]['cores'])
+        bsize = str(DEFAULT_PARAMS[self.nc]['bsize'])
+        run_time = str(DEFAULT_PARAMS[self.nc]['run_time'])
+
+        if not os.path.isdir(self.path):
+            raise NotADirectoryError(self.path)
+
+        cwd = os.getcwd()
+
+        os.chdir(self.path)
+
+        sj = ['sj', self.xyz, '-n', nodes, '-c', cores, '-t', run_time,
+              '-f', self.runtype, '-s', bsize, '--title', str(self),
+              '--donotcenter']
+
+        # run setup job script - sj
+        subprocess.call(sj)
+
+        # move back to current working directory
+        os.chdir(cwd)
+
+    def submit_job(self):
+        """
+        Runs a CP2K job
+        """
+        cwd = os.getcwd()
+        os.chdir(self.path)
+
+        # submit job to slurm
+        slurm_id = subprocess.check_output(['sbatch', self.slurm]).split()[-1]
+
+        # save slurm id as empty file
+        open(os.path.join(self.path, slurm_id), 'w').close()
+
+
+        # move back to current working directory
+        os.chdir(cwd)
 
 if __name__ == '__main__':
     j = Jobber()
