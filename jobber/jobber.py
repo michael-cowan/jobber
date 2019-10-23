@@ -107,6 +107,8 @@ class Tracker(object):
             # make JobID object from JobID string (js)
             jobid = JobID(jobid_str=js)
 
+            print('CHECKING:'.rjust(RJUST) + ' ' + js)
+
             # if job is still running,
             # leave it in running list
             result = jobid.is_running()
@@ -573,7 +575,7 @@ class JobID(object):
                         fidw.write(line.replace('ATOMIC', 'RESTART'))
 
                     # do not write lines containing COORD_FILE
-                    if 'COORD_FILE' not in line:
+                    elif 'COORD_FILE' not in line:
                         fidw.write(line)
 
         # submit job
