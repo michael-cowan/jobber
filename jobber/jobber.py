@@ -1,3 +1,4 @@
+from __future__ import print_function
 import utils
 import os
 import re
@@ -100,36 +101,45 @@ class Tracker(object):
         if basedir is None:
             basedir = PROJECT_PATH
 
+        # tally up number running, submitted, completed, restarting, etc.
+        tally = dict(Running=0, Pending=0, Restarting=0)
+
+        print('----- CURRENT STATUS -----'.center(3 * RJUST))
+
         # take slice of entire list to ensure complete iteration
         # while removing items from self.running
-        print('----- CURRENT STATUS -----'.center(3 * RJUST))
-        for js in list(self.running)[:] + list(self.needscheck)[:]:
+        for js in set(list(self.running)[:] + list(self.needscheck)[:]):
             # make JobID object from JobID string (js)
             jobid = JobID(jobid_str=js)
 
-            print('CHECKING:'.rjust(RJUST) + ' ' + js)
+            jobid.print_status('CHECKING')
 
             # if job is still running,
             # leave it in running list
             result = jobid.is_running()
             if result:
-                res_str = result.title() + ':'
-                print(res_str.rjust(RJUST) + ' ' + js)
+                jobid.print_status(result.title())
+                tally[result.title()] += 1
                 if js in self.needscheck:
                     self.needscheck.remove(js)
                 self.running.add(js)
                 continue
-            else:
+            elif js in self.running:
                 self.running.remove(js)
 
             # move jobid to completed list
             if jobid.is_completed():
-                print('Completed:'.rjust(RJUST) +  ' ' + js)
+                jobid.print_status('Success')
                 self.completed.add(js)
+                # remove jobid from running and needscheck
+                for s in [self.running, self.needscheck]:
+                    if js in s:
+                        s.remove(js)
 
             # else restart job
             else:
-                print('Restarting:'.rjust(RJUST) + ' ' + js)
+                jobid.print_status('Restarting')
+                tally['Restarting'] += 1
                 jobid.restart()
                 self.needscheck.add(js)
 
@@ -137,6 +147,13 @@ class Tracker(object):
         self.update_tracker('running')
         self.update_tracker('completed')
         self.update_tracker('needscheck')
+
+        # print tallies
+        print('----- TOTALS -----'.center(3 * RJUST))
+        for t in tally:
+            print(t.rjust(RJUST) + ': %i' % tally[t])
+
+        print('Completed'.rjust(RJUST) + ': %i' % (len(self.completed)))
 
 
 class Jobber(Tracker):
@@ -414,6 +431,10 @@ class JobID(object):
         self.input = 'input_%s.inp' % base
         self.output = 'output_%s.out' % base
 
+        # results data attributes
+        # energy (Ha)
+        self.energy = None
+
     def __repr__(self):
         return self.value
 
@@ -456,6 +477,25 @@ class JobID(object):
     def build_folder(self):
         pathlib.Path(self.path).mkdir(parents=True)
 
+    def get_data(self):
+        """
+        Returns relavent data from output file
+        """
+        if self.energy is not None:
+            return self.energy
+
+        if not utils.files_exist(self.path, [self.output]):
+            raise ValueError('No output found!')
+
+        out_path = os.path.join(self.path, self.output)
+
+        num = '-[0-9]+\\.[0-9]+'
+        grep = 'egrep "Total energy: +({0})" {1} | tail -1 | egrep -o "\\{0}"'.format(num, out_path)
+
+        self.energy = float(subprocess.check_output(grep, shell=True))
+
+        return self.energy
+
     def get_ordering_id(self):
         """
         Finds the next ordering id number
@@ -485,7 +525,7 @@ class JobID(object):
 
     def is_running(self, queue=None):
         """
-        TODO: search sacct results to see if jobid is running
+        Searches sacct results to see if jobid is running
         """
         # if not utils.files_exist(self.path, [self.output]):
         #     return False
@@ -531,6 +571,17 @@ class JobID(object):
 
         # Completed if last_line found at end of file
         return last_line in end
+
+    def print_status(self, label=None):
+        """
+        Prints JobID string with a status label
+        <label>: <JobID>
+        """
+        if label is not None:
+            value = label.rjust(RJUST) + ': ' + str(self)
+        else:
+            value = str(self)
+        print(value)
 
     def restart(self):
         """
