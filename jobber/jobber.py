@@ -519,6 +519,7 @@ class JobID(object):
         """
         atoms = ase.io.read(self.xyz_path)
         dists = atoms.get_all_distances()
+        toremove = []
         ms = dict()
         indices = range(len(atoms))
         for i in indices[:]:
@@ -533,7 +534,20 @@ class JobID(object):
                         ms[a.symbol].append([i, close[j]])
                         indices.remove(i)
                         indices.remove(close[j])
+                        toremove.append(i)
+                        toremove.append(close[j])
                         break
+            # add ligand atoms to the "toremove" list
+            # and remove them from future distance calcs
+            elif atoms[i].number < 16:
+                toremove.append(i)
+                indices.remove(i)
+
+        new = atoms[[z for z in range(len(atoms)) if z not in toremove]]
+        from ase.visualize import view
+        view(new)
+        remd = atoms[toremove]
+        view(remd)
         return ms
 
     def get_ordering_id(self):
