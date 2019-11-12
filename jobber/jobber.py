@@ -38,13 +38,15 @@ class Tracker(object):
     """
     def __init__(self):
         self.trackers = ['.running.txt', '.completed.txt', '.failed.txt',
-                         '.needscheck.txt']
+                         '.needscheck.txt', '.core_running.txt', '.shell_running.txt']
 
         # tracker attributes
         self.running = None
         self.completed = None
         self.failed = None
         self.needscheck = None
+        self.core_running = None
+        self.shell_running = None
 
         # tracker paths
         self.running_path = None
@@ -63,7 +65,6 @@ class Tracker(object):
             # get base name of tracker
             name = t[1:-4]
             pathname = name + '_path'
-
             # build path string
             path = os.path.join(PROJECT_PATH, t)
 
@@ -154,6 +155,20 @@ class Tracker(object):
             print(t.rjust(RJUST) + ': %i' % tally[t])
 
         print('Completed'.rjust(RJUST) + ': %i' % (len(self.completed)))
+
+    def submit_coreshell(self, lim=-1):
+        for i, c in enumerate(self.completed):
+            if i == lim:
+                break
+            if (c not in self.core_running
+                and c not in self.shell_running):
+                c = JobID(jobid_str=c)
+                c.run_coreshell()
+                self.core_running.add(str(c))
+                self.shell_running.add(str(c))
+                print('Submitted core shell of ' + str(c))
+        self.update_tracker('core_running')
+        self.update_tracker('shell_running')
 
 
 class Jobber(Tracker):
@@ -425,6 +440,7 @@ class JobID(object):
         self.xyz = self.nc + '_' + self.ordering_id + '.xyz'
         self.xyz_path = os.path.join(self.path, self.xyz)
 
+
         # get job submission file names
         base = self.nc.split('_')[0]
         self.slurm = 'slurm_%s.sl' % base
@@ -496,6 +512,30 @@ class JobID(object):
 
         return self.energy
 
+    def get_ms_pairs(self):
+        """
+        Returns Metal Sulfur pairs in NC
+        - finds closest metal to each sulfur
+        """
+        atoms = ase.io.read(self.xyz_path)
+        dists = atoms.get_all_distances()
+        ms = dict()
+        indices = range(len(atoms))
+        for i in indices[:]:
+            if atoms[i].symbol == 'S':
+                # sort interatomic distances (closest to furthest)
+                close = sorted(indices, key=lambda x: dists[i][x])
+                for j in range(1, len(atoms)):
+                    a = atoms[close[j]]
+                    if a.symbol not in {'C', 'H', 'S'}:
+                        if a.symbol not in ms:
+                            ms[a.symbol] = []
+                        ms[a.symbol].append([i, close[j]])
+                        indices.remove(i)
+                        indices.remove(close[j])
+                        break
+        return ms
+
     def get_ordering_id(self):
         """
         Finds the next ordering id number
@@ -517,11 +557,20 @@ class JobID(object):
         """
         return utils.files_exist(self.path, [self.xyz, str(self) + '.npy'])
 
-    def is_setup(self):
+    def is_setup(self, runtype=None):
         """
         Returns true if a CP2K job has been setup
         """
-        return utils.files_exist(self.path, [self.slurm, self.input])
+        if runtype is None:
+            inp = self.input
+            slurm = self.slurm
+            path = self.path
+        else:
+            inp = 'input_%s.inp' % runtype.lower()
+            slrum = 'slurm_%s.sl' % runtype.lower()
+            path = os.path.join(self.path, runtype.lower())
+
+        return utils.files_exist(path, [slurm, inp])
 
     def is_running(self, queue=None):
         """
@@ -557,8 +606,15 @@ class JobID(object):
         # no matches found
         return False
 
-    def is_completed(self):
-        has_output = utils.files_exist(self.path, [self.output])
+    def is_completed(self, runtype=None):
+        if runtype is None:
+            path = self.path
+            outp = self.output
+        else:
+            path = os.path.join(self.path, runtype.lower())
+            outp = 'output_%s.out' % runtype.lower()
+
+        has_output = utils.files_exist(path, [outp])
 
         # if not has... lol
         if not has_output:
@@ -567,7 +623,7 @@ class JobID(object):
         # see if output file ends with CP2K completion string
         last_line = '  **** **  *******  **  PROGRAM STOPPED IN'
         end = subprocess.check_output(['tail', '-3',
-                                       os.path.join(self.path, self.output)])
+                                       os.path.join(path, outp)])
 
         # Completed if last_line found at end of file
         return last_line in end
@@ -632,6 +688,17 @@ class JobID(object):
         # submit job
         self.submit_job()
 
+    def run_coreshell(self):
+        """
+        Submits core shell jobs
+        """
+        for n in ['core', 'shell']:
+            path = os.path.join(self.path, n)
+            os.chdir(path)
+            slurmid = subprocess.check_output('sbatch slurm_%s.sl' % n, shell=True).split()[-1]
+            with open(slurmid, 'w') as fidw:
+                pass
+
     def setup_job(self):
         """
         Sets up a CP2K job with default options
@@ -657,6 +724,85 @@ class JobID(object):
 
         # move back to current working directory
         os.chdir(cwd)
+
+    def setup_coreshell(self):
+        """
+        Sets up CP2K jobs for core and shell
+        """
+        if not self.is_completed():
+            raise ValueError("NC optimization not complete")
+
+        # stores opt NC and save core & shell if not already done
+        self.store_opt()
+
+        nodes = str(DEFAULT_PARAMS[self.nc]['nodes'])
+        cores = str(DEFAULT_PARAMS[self.nc]['cores'])
+        bsize = str(DEFAULT_PARAMS[self.nc]['bsize'])
+        run_time = '6'
+
+        for n in ['core', 'shell']:
+            ndir = os.path.join(self.path, n)
+            fname = n + '_' + self.ordering_id + '_opt.xyz'
+
+            if not os.path.isdir(ndir):
+                os.mkdir(ndir)
+
+            shutil.copy(os.path.join(self.path, 'optgeom', fname),
+                        os.path.join(ndir, fname))
+
+            os.chdir(ndir)
+            
+            sj = ['sj', fname, '-n', nodes, '-c', cores, '-t', run_time,
+                  '-f', self.runtype, '-s', bsize, '--title', str(self),
+                  '--donotcenter', '-r', 'ENERGY']
+
+            # run setup job script
+            subprocess.call(sj)
+
+    def store_opt(self):
+        """
+        Gets optimized NC structure and stores it in optgeom folder
+        - also creates core and shell xyz files
+        """
+        if not self.is_completed():
+            raise ValueError("NC optimization not complete")
+
+        # create optimized nc file in optgeom
+        optnc = self.xyz.replace('.xyz', '_opt.xyz')
+
+        # create optgeom folder
+        optdir = os.path.join(self.path, 'optgeom')
+        if not os.path.isdir(optdir):
+            os.mkdir(optdir)
+
+        # return if opt nc has already been made
+        elif utils.files_exist(optdir, [optnc,
+                                        'core_%s_opt.xyz' % self.ordering_id,
+                                        'shell_%s_opt.xyz' % self.ordering_id]):
+            return 'Opt NC already saved'
+
+        # number of atoms in NC
+        n_atoms = int(subprocess.check_output('head -1 %s' % (self.xyz_path),
+                                              shell=True))
+
+        optnc_path = os.path.join(optdir, optnc)
+
+        # create opt NC xyz
+        if not os.path.isfile(optnc_path):
+            subprocess.call('tail -%i %s > %s' % (n_atoms + 2, self.xyz_path, optnc_path),
+                            shell=True)
+
+        # create core and shell xyzs
+        cwd = os.getcwd()
+
+        os.chdir(optdir)
+        _ = subprocess.check_output('ncsep %s --save' % optnc, shell=True)
+
+        for n in ['core', 'shell']:
+            subprocess.call('mv {0}.xyz {0}_{1}_opt.xyz'.format(n, self.ordering_id), shell=True)
+
+        # return True for success
+        return True
 
     def submit_job(self):
         """
