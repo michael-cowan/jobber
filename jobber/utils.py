@@ -42,8 +42,9 @@ def multidimensional_shifting(num_samples, sample_size, elements,
 
     # shift by numbers & find largest (by finding the smallest of the negative)
     shifted_probabilities = random_shifts - replicated_probabilities
-    return np.argpartition(shifted_probabilities,
-                           sample_size, axis=1)[:, :sample_size]
+    return elements[np.argpartition(
+                        shifted_probabilities,
+                        sample_size, axis=1)[:, :sample_size]]
 
 
 if __name__ == '__main__':
