@@ -501,6 +501,11 @@ class JobID(object):
         """
         Returns relavent data from output file
         """
+        return self.get_energy()
+
+    def get_energy(self):
+        """Returns electronic energy from geo opt
+        """
         if self.energy is not None:
             return self.energy
 
