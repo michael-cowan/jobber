@@ -205,7 +205,7 @@ class Jobber(Tracker):
         self.au_indices = np.where(self.nc_opt.numbers == 79)[0]
 
         # get core indices (match based on position of core_opt atoms)
-        self.core_indices = np.zeros(len(self.au_indices))
+        self.core_indices = np.zeros(len(self.core_opt)).astype(int)
         for i, c in enumerate(self.core_opt):
             self.core_indices[i] = np.where((abs(c.position -
                                                  self.nc_opt.positions) < 0.1)
