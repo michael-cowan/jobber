@@ -476,7 +476,7 @@ class JobID(object):
         self.nc = jobber.nc
         self.dopant = jobber.dopant
         self.conc_dirname = str(conc_dirname)
-        self.ordering_id = self.get_ordering_id()
+        self.ordering_id = self.get_next_ordering_id()
         self.runtype = runtype
 
     def parse_jobid_str(self, jobid_str):
@@ -554,7 +554,7 @@ class JobID(object):
         view(remd)
         return ms
 
-    def get_ordering_id(self):
+    def get_next_ordering_id(self):
         """
         Finds the next ordering id number
         """
@@ -563,11 +563,17 @@ class JobID(object):
         # attempt to find all previous ordering id folders
         last_found = glob.glob(os.path.join(path, '[0-9]' * 6))
 
-        # return next id or 1 if no folders were found
-        i = 1 if not last_found else int(os.path.basename(max(last_found))) + 1
+        # convert ids to ints and add a 0 in case no ids were found
+        found_ids = set([int(os.path.basename(f)) for f in last_found] + [0])
+
+        # create set of ints up to max found ordering id
+        rng_of_ids = set(range(1, max(found_ids) + 2))
+
+        # get the lowest available id
+        low_available_id = min(rng_of_ids - found_ids)
 
         # return as a six digit string padded with 0s
-        return '%06i' % i
+        return '%06i' % low_available_id
 
     def is_initialized(self):
         """
